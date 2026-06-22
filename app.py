@@ -20,6 +20,31 @@ from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 # ── query handler ─────────────────────────────────────────────────────────────
 
+def _format_listing(item: dict) -> str:
+    """Render a selected listing dict into a readable multi-line panel string.
+
+    Includes title, price (e.g. "$24.00"), platform, size, condition, and the
+    style tags. Reads only fields documented in utils/data_loader.load_listings.
+    """
+    title = item.get("title", "Untitled listing")
+    price = item.get("price")
+    price_text = f"${price:.2f}" if isinstance(price, (int, float)) else "Price unavailable"
+    platform = item.get("platform", "unknown")
+    size = item.get("size", "—")
+    condition = item.get("condition", "—")
+    style_tags = item.get("style_tags") or []
+    tags_text = ", ".join(style_tags) if style_tags else "—"
+
+    return (
+        f"{title}\n"
+        f"Price: {price_text}\n"
+        f"Platform: {platform}\n"
+        f"Size: {size}\n"
+        f"Condition: {condition}\n"
+        f"Style tags: {tags_text}"
+    )
+
+
 def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     """
     Called by Gradio when the user submits a query.
@@ -33,18 +58,64 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
             (listing_text, outfit_suggestion, fit_card)
         Each string maps to one of the three output panels in the UI.
 
-    TODO:
-        1. Guard against an empty query (return early with an error message).
-        2. Select the wardrobe based on wardrobe_choice.
-        3. Call run_agent() with the query and selected wardrobe.
-        4. If session["error"] is set, return the error in the first panel
-           and empty strings for the other two.
-        5. Otherwise, format session["selected_item"] into a readable listing_text
-           string and return it along with session["outfit_suggestion"] and
-           session["fit_card"].
+    Maps the run_agent session to the three panels per the frozen partial-success
+    mapping in planning.md ("State Management"), so partial results survive a
+    later step's failure:
+        (a) search failed   -> (error,        "",     "")
+        (b) outfit failed    -> (listing_text, error,  "")
+        (c) fit card failed  -> (listing_text, outfit, error)
+        (d) success          -> (listing_text, outfit, fit_card)
     """
-    # TODO: implement this function
-    return "Agent not yet implemented.", "", ""
+    # 1. Guard against an empty / whitespace-only query.
+    if user_query is None or not user_query.strip():
+        return (
+            "Please describe what you're looking for "
+            "(e.g. 'vintage graphic tee under $30').",
+            "",
+            "",
+        )
+
+    # 2. Select the wardrobe based on the radio choice.
+    if wardrobe_choice.startswith("Empty"):
+        wardrobe = get_empty_wardrobe()
+    else:
+        wardrobe = get_example_wardrobe()
+
+    # 3. Run the planning loop.
+    session = run_agent(user_query, wardrobe)
+
+    # 4. Build the listing text once when an item was selected. When present,
+    #    enrich panel 1 (no new panels): a 🔁 retry note above the listing and a
+    #    💰 price-check line below it.
+    selected_item = session.get("selected_item")
+    if selected_item:
+        listing_text = _format_listing(selected_item)
+        retry_note = session.get("retry_note")
+        if retry_note:
+            listing_text = f"🔁 {retry_note}\n\n{listing_text}"
+        price_assessment = session.get("price_assessment")
+        if price_assessment:
+            listing_text = f"{listing_text}\n💰 Price check: {price_assessment}"
+    else:
+        listing_text = ""
+
+    error = session.get("error")
+    outfit = session.get("outfit_suggestion")
+    fit_card = session.get("fit_card")
+
+    # 5. Map session -> panels, preserving partial results (cases a–d).
+    if error:
+        # (a) search failed: nothing was selected.
+        if selected_item is None:
+            return error, "", ""
+        # (b) outfit failed: listing kept, error replaces the outfit panel.
+        if not outfit:
+            return listing_text, error, ""
+        # (c) fit card failed: listing + outfit kept, error replaces panel 3.
+        return listing_text, outfit, error
+
+    # (d) success: listing + outfit + fit card.
+    return listing_text, outfit, fit_card
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
